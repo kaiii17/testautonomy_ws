@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Lidar Pulse Map</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.1/socket.io.min.js"></script>
+  <style>
+    body { margin:0; overflow:hidden; background:black; }
+    canvas { display:block; }
+  </style>
+</head>
+<body>
+  <canvas id="lidarCanvas"></canvas>
+  <script>
+    const canvas = document.getElementById('lidarCanvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    const centerX = canvas.width/2;
+    const centerY = canvas.height/2;
+    const scale = 50; // m -> pixel
+
+    const socket = io();
+
+    let robotHeading = 0;
+
+    socket.on('lidar_data', (data)=>{
+        robotHeading = data.robot.heading;
+
+        ctx.fillStyle='black';
+        ctx.fillRect(0,0,canvas.width,canvas.height);
+
+        // robot center
+        ctx.save();
+        ctx.translate(centerX,centerY);
+        ctx.rotate(robotHeading*Math.PI/180);
+        ctx.fillStyle='lime';
+        ctx.fillRect(-5,-5,10,10); // 배 중심
+        ctx.restore();
+
+        // pulses
+        data.pulses.forEach(p=>{
+            ctx.save();
+            ctx.translate(centerX,centerY);
+            ctx.rotate(robotHeading*Math.PI/180);
+            if(p.type==='WALL') ctx.fillStyle='red';
+            else ctx.fillStyle='blue';
+            ctx.fillRect(p.x*scale-2,p.y*scale-2,4,4);
+            ctx.restore();
+        });
+    });
+  </script>
+</body>
+</html>
