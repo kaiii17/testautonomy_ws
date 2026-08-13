@@ -75,6 +75,15 @@ def generate_launch_description():
 
     # ===== 3. 판단/제어 계층 (인식 켜지고 나서 3초 뒤 시작) =====
 
+    # goal_heading은 별도 노드가 아니라 각 미션 노드가 직접 GPS 방위각/거리를
+    # 계산해서 'goal/heading' 토픽으로 발행하는 구조 (start/end 템플릿,
+    # field_config.py 참고). avoidance가 이 토픽을 구독해서 gap 스코어링의
+    # 목표방향 가중치로 사용함 - 토픽 자체는 여전히 사용 중, 별도 노드만 없음.
+
+    # mission_0(장소이동) 폐기됨 - mission_1의 MOVING 단계(m1s로 이동)가
+    # 그 역할을 흡수함. field_config.py의 MISSION_TARGETS에서도 m0s/m0e
+    # 제거됨.
+
     navigation_nodes = TimerAction(
         period=3.0,
         actions=[
@@ -84,13 +93,6 @@ def generate_launch_description():
                  name='arbiter', output='screen'),
             Node(package='kaboat_navigation', executable='avoidance',
                  name='avoidance', output='screen'),
-            # goal_heading 삭제됨 - 각 미션 노드가 직접 GPS 방위각/거리를
-            # 계산하는 구조로 변경 (start/end 템플릿, field_config.py 참고)
-
-            # mission_0(장소이동) 추가 - 출발지에서 미션1 시작 전 준비구역까지
-            # 순수 GPS 이동만 담당
-            Node(package='kaboat_navigation', executable='mission_0',
-                 name='mission_0', output='screen'),
             Node(package='kaboat_navigation', executable='mission_1',
                  name='mission_1', output='screen'),
             Node(package='kaboat_navigation', executable='mission_2',
