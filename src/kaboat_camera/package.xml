@@ -3,9 +3,16 @@
 <package format="3">
   <name>kaboat_camera</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>KABOAT ZED2i 카메라 색상/모양 인식 노드 (camera_node)</description>
   <maintainer email="ubuntu@todo.todo">ubuntu</maintainer>
   <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>python3-opencv</depend>
+  <depend>python3-numpy</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
