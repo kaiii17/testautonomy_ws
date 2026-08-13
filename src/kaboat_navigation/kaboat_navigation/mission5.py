@@ -107,7 +107,9 @@ def fuse_vision_lidar(candidates, clusters, max_bearing_diff_deg=8.0):
 
 class GatePositionMemory:
     """이미 통과한 게이트의 절대좌표(lat, lon)를 기억해서, 회피기동으로
-    돌아섰다가 다시 같은 게이트를 근접후보로 잡아 중복 카운트하는 것을 방지."""
+    돌아섰다가 다시 같은 게이트를 근접후보로 잡아 중복 카운트하는 것을 방지.
+    Mission5(Node)가 아닌 별도 클래스라 bearing_deg/distance_m을 클래스
+    내부 staticmethod가 아닌 모듈 함수로 둔 것(Mission5와 공유하기 위함)."""
 
     SAME_GATE_RADIUS_M = 3.0
 
@@ -124,45 +126,38 @@ class GatePositionMemory:
         self.passed_positions.append((lat, lon))
 
 
-class GateNavigation(Node):
+class Mission5(Node):
     """
-    mission_5 - 항로추종 (게이트).
-    빨강/초록 부표 쌍(게이트)을 순서대로 통과.
+    미션 5 - 항로추종/게이트.
+    대회 규정: 빨강/초록 부표 쌍(게이트)이 코스를 따라 배치되어 있으며, 이를
+    순서대로 통과해야 함. 게이트 이탈/충돌 시 패널티.
 
-    센서 활용:
-      - 카메라(camera/detections, camera_node.py 발행)는 색상 분류만 신뢰,
-        실제 range/bearing은 LiDAR(/scan) 클러스터로 교체(fuse_vision_lidar)
-      - GPS로 이미 통과한 게이트의 절대좌표를 기억(GatePositionMemory) ->
-        회피기동으로 돌아서 같은 게이트를 다시 근접후보로 잡는 것을 방지
+    흐름:
+      MOVING : m5s로 이동하며 게이트 탐색 대기
+      TASK   : 전방 콘(±80도) 안 red/green 각각 최근접 1개 검출 -> LiDAR로
+               range/bearing 정밀보정(fuse_vision_lidar) -> 중간 방위각/거리를
+               게이트 중심으로 삼아 조향. GPS로 이미 통과한 게이트를 기억해
+               중복 카운트 방지(GatePositionMemory). 거리가 최소값을 찍고
+               다시 멀어지면 통과 판정.
+      EXIT   : 게이트가 3초간 안 보이고 1개 이상 통과했으면 m5e로 이동 후 done
 
-    가정
-      - 'camera/detections' (String, JSON): camera_node.py가 발행하는 색상
-        분류된 물체 목록. 실제 필드: [{"color":"R"/"G"/"B", "angle":라디안,
-        "shape":..., "distance":거리(옵션)}, ...]
-        게이트는 R/G만 쓰므로 buoys_cb에서 color를 'red'/'green'으로,
-        angle(라디안)을 bearing_deg(도)로 변환해서 기존 로직 그대로 사용.
-
-    로직:
-      1. 전방 콘(±80도) 안의 red/green 각각 최근접 1개 -> LiDAR로 range/bearing 보정
-      2. GPS로 게이트 중간점 절대좌표 계산 -> 이미 통과기록에 있으면 무시
-      3. 게이트 중간 방위각 -> goal/heading 발행
-      4. 게이트 중간점까지 거리가 최소값 찍고 다시 멀어지면 "통과" 판정
-      5. 전방 콘 안에 게이트가 3초간 안 보이고 gate_count >= 1 이면 mission/done
-
-    아직 게이트를 못 찾은 초반에는 m5s로 이동한다.
+    camera/detections(camera_node.py 발행, color 'R'/'G'/'B' + angle(rad))를
+    게이트 판정용 형식(color 'red'/'green' + bearing_deg(도))으로 변환해서 사용.
     """
+
+    MY_MISSION = 'mission_5'
 
     FORWARD_CONE_DEG = 80.0
     NO_GATE_TIMEOUT = 3.0
-    MY_MISSION = 'mission_5'
 
     # camera_node.py의 color 코드('R'/'G'/'B') -> 게이트 판정용 색상명.
     # 파랑(B)은 게이트와 무관하므로 매핑에서 제외 -> 자동으로 걸러짐.
     CAMERA_COLOR_MAP = {'R': 'red', 'G': 'green'}
 
     def __init__(self):
-        super().__init__('mission5')
+        super().__init__('mission_5')
         self.active = False
+        self.phase = 'MOVING'
         self.current_heading = None
         self.current_lat = None
         self.current_lon = None
@@ -194,6 +189,7 @@ class GateNavigation(Node):
 
     def started_cb(self, msg):
         if msg.data == self.MY_MISSION:
+            self.phase = 'MOVING'
             self.gate_count = 0
             self.tracking_min_dist = None
             self.last_gate_seen_time = None
@@ -265,6 +261,8 @@ class GateNavigation(Node):
                 return
             self.pending_gate_pos = (gate_lat, gate_lon)
 
+        if self.last_gate_seen_time is None:
+            self.phase = 'TASK'
         self.last_gate_seen_time = self.get_clock().now()
 
         if self.tracking_min_dist is None or mid_dist < self.tracking_min_dist:
@@ -291,33 +289,39 @@ class GateNavigation(Node):
             return
 
         if self.exiting:
-            self.handle_exit_transit()
+            self.run_exit()
             return
 
         if self.last_gate_seen_time is None:
-            point = MISSION_TARGETS.get('m5s')
-            if point is None:
-                self.get_logger().warn('m5s 좌표 없음 (field_config.py 확인)', throttle_duration_sec=5.0)
-                return
-            if self.current_lat is not None:
-                dist_to_point = distance_m(self.current_lat, self.current_lon, point[0], point[1])
-                if dist_to_point > TRANSIT_ARRIVAL_RADIUS_M:
-                    brg = bearing_deg(self.current_lat, self.current_lon, point[0], point[1])
-                    h_msg = Float32()
-                    h_msg.data = brg
-                    self.heading_pub.publish(h_msg)
-                    cmd = Twist()
-                    cmd.linear.x = 0.2
-                    self.cmd_pub.publish(cmd)
+            self.run_moving()
             return
 
         elapsed = (self.get_clock().now() - self.last_gate_seen_time).nanoseconds / 1e9
         if elapsed > self.NO_GATE_TIMEOUT and self.gate_count >= 1:
             self.get_logger().info(f'게이트 안 보임({elapsed:.1f}s) - 종료지점으로 이동 시작')
+            self.phase = 'EXIT'
             self.exiting = True
             self.last_gate_seen_time = None
 
-    def handle_exit_transit(self):
+    def run_moving(self):
+        point = MISSION_TARGETS.get('m5s')
+        if point is None:
+            self.get_logger().warn('m5s 좌표 없음 (field_config.py 확인)', throttle_duration_sec=5.0)
+            return
+        if self.current_lat is None:
+            return
+
+        dist_to_point = distance_m(self.current_lat, self.current_lon, point[0], point[1])
+        if dist_to_point > TRANSIT_ARRIVAL_RADIUS_M:
+            brg = bearing_deg(self.current_lat, self.current_lon, point[0], point[1])
+            h_msg = Float32()
+            h_msg.data = brg
+            self.heading_pub.publish(h_msg)
+            cmd = Twist()
+            cmd.linear.x = 0.2
+            self.cmd_pub.publish(cmd)
+
+    def run_exit(self):
         point = MISSION_TARGETS.get('m5e')
         if point is not None and self.current_lat is not None:
             dist_to_point = distance_m(self.current_lat, self.current_lon, point[0], point[1])
@@ -339,7 +343,7 @@ class GateNavigation(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = GateNavigation()
+    node = Mission5()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
