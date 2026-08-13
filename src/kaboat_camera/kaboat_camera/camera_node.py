@@ -15,9 +15,13 @@ class CameraNode(Node):
     ZED2i 카메라 - 완전 심플 버전.
     색 마스크 -> 컨투어 -> 꼭짓점 개수로만 모양 판별. 그 외 아무것도 없음.
     빨강이 안 잡히는 문제 원인 파악을 위해 각 색의 마스크를 그대로
-    'camera/mask_R', 'camera/mask_G', 'camera/mask_B'로 발행 - rosboard로
-    직접 눈으로 확인 가능 (전부 까맣게 나오면 색 자체가 안 잡히는 것,
-    흰 덩어리가 있는데 detections에 없으면 그다음 단계 문제).
+    'camera/mask_R', 'camera/mask_G', 'camera/mask_B', 'camera/mask_W'로
+    발행 - rosboard로 직접 눈으로 확인 가능 (전부 까맣게 나오면 색 자체가
+    안 잡히는 것, 흰 덩어리가 있는데 detections에 없으면 그다음 단계 문제).
+
+    W(흰색)는 mission_4 규정(흰색 부표 = 반시계 선회)용으로 추가됨.
+    채도(S) 낮고 명도(V) 높은 영역으로 판정 - 조명 환경에 따라 S_MAX/V_MIN
+    실측 튜닝 필요 (형광등/야외 직사광선에서 값이 달라질 수 있음).
     """
 
     # 빨강은 HSV 색상환 양끝(0근처, 180근처)에 걸쳐있어 두 범위를 따로 두고
@@ -25,6 +29,10 @@ class CameraNode(Node):
     COLOR_RANGES = {
         'G': ((35, 80, 60), (85, 255, 255)),
         'B': ((100, 100, 100), (130, 255, 255)),
+        # TODO: 실측 후 조정. 흰색 부표 특성상 하이라이트로 과포화되는
+        # 경우가 많아 V_MIN을 너무 낮게 잡으면 회색 배경/파도까지 같이
+        # 잡힐 수 있음 - 현장에서 mask_W 이미지 보면서 조정할 것.
+        'W': ((0, 0, 180), (180, 40, 255)),
     }
     RED_RANGES = [
         ((0, 70, 60), (12, 255, 255)),
@@ -37,7 +45,7 @@ class CameraNode(Node):
     RGB_TOPIC = '/zed/zed_node/rgb/color/rect/image'
     DEPTH_TOPIC = '/zed/zed_node/depth/depth_registered'
 
-    DEBUG_COLORS_BGR = {'R': (0, 0, 255), 'G': (0, 255, 0), 'B': (255, 0, 0)}
+    DEBUG_COLORS_BGR = {'R': (0, 0, 255), 'G': (0, 255, 0), 'B': (255, 0, 0), 'W': (255, 255, 255)}
 
     def __init__(self):
         super().__init__('camera_node')
@@ -54,11 +62,11 @@ class CameraNode(Node):
         self.debug_pub = self.create_publisher(Image, 'camera/debug_image', 10)
         self.mask_pubs = {
             c: self.create_publisher(Image, f'camera/mask_{c}', 10)
-            for c in ['R', 'G', 'B']
+            for c in ['R', 'G', 'B', 'W']
         }
 
         self.get_logger().info(
-            f'카메라 노드 시작 - 완전심플버전 (등록색={list(self.COLOR_RANGES.keys())})')
+            f'카메라 노드 시작 - 완전심플버전 (등록색={["R"] + list(self.COLOR_RANGES.keys())})')
 
     def depth_cb(self, msg):
         try:
