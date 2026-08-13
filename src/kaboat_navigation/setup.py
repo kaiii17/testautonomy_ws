@@ -23,10 +23,9 @@ setup(
     entry_points={
         'console_scripts': [
             'mission_manager = kaboat_navigation.mission_manager:main',
+            'test_mission_manager = kaboat_navigation.test_mission_manager:main',
             'arbiter = kaboat_navigation.arbiter:main',
             'avoidance = kaboat_navigation.avoidance:main',
-            'goal_heading = kaboat_navigation.goal_heading:main',
-            'mission_0 = kaboat_navigation.mission_0:main',
             'mission_1 = kaboat_navigation.mission_1:main',
             'mission_2 = kaboat_navigation.mission_2:main',
             'mission_3 = kaboat_navigation.mission_3:main',
