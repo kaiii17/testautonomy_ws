@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'color_node = kaboat_camera.color_node:main',
+            'camera_node = kaboat_camera.camera_node:main',
         ],
     },
 )
