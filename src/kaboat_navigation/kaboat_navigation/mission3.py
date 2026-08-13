@@ -10,9 +10,11 @@ from kaboat_navigation.field_config import MISSION_TARGETS, DOCK_SECTORS, MISSIO
 
 class Mission3(Node):
     """
-    미션 3 = 도킹.
+    미션 3 - 도킹.
+    대회 규정: 좌/중/우 3개 슬롯 중 대회 당일 지정된 색+모양 슬롯 하나에
+    정확히 도킹해야 함(색상+모양 둘 다 일치).
 
-    전체 흐름:
+    흐름:
       MOVING : m3s로 GPS 이동. 도착하면 SEARCH로 전환.
       SEARCH : m3s 도착 지점 GPS를 고정점으로 삼아 밀림 보정하며 대기.
                camera/detections에서 TARGET_COLOR+TARGET_SHAPE를 최근
@@ -26,6 +28,8 @@ class Mission3(Node):
 
     목표 색/모양은 field_config.py의 MISSION_TARGETS_CONFIG에서 가져옴.
     """
+
+    MY_MISSION = 'mission_3'
 
     TARGET_COLOR = MISSION_TARGETS_CONFIG['mission_3']['color']
     TARGET_SHAPE = MISSION_TARGETS_CONFIG['mission_3']['shape']
@@ -84,10 +88,10 @@ class Mission3(Node):
         self.get_logger().info('미션3(도킹) 노드 대기 중')
 
     def active_cb(self, msg):
-        self.active = (msg.data == 'mission_3')
+        self.active = (msg.data == self.MY_MISSION)
 
     def started_cb(self, msg):
-        if msg.data == 'mission_3':
+        if msg.data == self.MY_MISSION:
             self.get_logger().info('★ 미션3 시작 (MOVING -> m3s로 이동) ★')
             self.phase = 'MOVING'
             self.hold_lat = None
@@ -273,7 +277,7 @@ class Mission3(Node):
             self.get_logger().info('m3e 도달! 미션3 완료')
             self.cmd_pub.publish(Twist())
             done = String()
-            done.data = 'mission_3'
+            done.data = self.MY_MISSION
             self.done_pub.publish(done)
             return
 
