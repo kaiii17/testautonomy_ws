@@ -7,21 +7,20 @@ from geometry_msgs.msg import Twist
 from kaboat_navigation.field_config import MISSION_TARGETS, TRANSIT_ARRIVAL_RADIUS_M
 
 
-class ObstacleCourse(Node):
+class Mission1(Node):
     """
-    mission_1 - 장애물회피 구간.
-    실제 '위험시 최후 회피'는 avoidance.py가 전담. 이 노드는 clear 상태일 때
-    목표(m1e) 방향으로 부드럽게 조향하는 역할을 맡음 - 비례제어 +
-    지수이동평균(EMA) 스무딩으로 급격한 방향전환 없이 goal_heading을 추종.
+    미션 1 - 장애물회피 통과.
+    대회 규정: 부표 사이(장애물 구간)를 통과하며 목적지까지 이동. 충돌 시 패널티.
 
     흐름:
-      1) m1s까지 부드러운 방위각 추종
-      2) 도착 -> m1e 방향으로 부드럽게 조향하며 직진
-      3) m1e 도착반경 안에 들어오면 완료 판정, mission/done 발행
+      MOVING : m1s로 GPS 이동 (비례제어 + EMA 스무딩 조향)
+      TASK   : m1e 방향으로 동일하게 조향, 도착시 done 발행
+
+    실제 라이다 회피는 이 노드가 신경쓰지 않음 - avoidance.py + arbiter가 전담.
+    이 노드는 clear 상태일 때 목표방향으로 부드럽게 조향하는 역할만 맡는다.
     """
 
     MY_MISSION = 'mission_1'
-    STATE_TO_START, STATE_TO_END = range(2)
 
     HEADING_KP = 1.2
     MAX_ANGULAR = 0.5
@@ -29,9 +28,9 @@ class ObstacleCourse(Node):
     TURN_SPEED_MIN_SCALE = 0.5
 
     def __init__(self):
-        super().__init__('mission1')
+        super().__init__('mission_1')
         self.active = False
-        self.state = self.STATE_TO_START
+        self.phase = 'MOVING'
 
         self.current_lat = None
         self.current_lon = None
@@ -56,7 +55,7 @@ class ObstacleCourse(Node):
 
     def started_cb(self, msg):
         if msg.data == self.MY_MISSION:
-            self.state = self.STATE_TO_START
+            self.phase = 'MOVING'
             self.done_logged = False
             self.smoothed_angular = 0.0
             self.get_logger().info('mission_1 시작 - 상태 초기화')
@@ -77,12 +76,12 @@ class ObstacleCourse(Node):
         if not self.active or self.current_lat is None:
             return
 
-        if self.state == self.STATE_TO_START:
-            self.handle_to_start()
-        elif self.state == self.STATE_TO_END:
-            self.handle_to_end()
+        if self.phase == 'MOVING':
+            self.run_moving()
+        elif self.phase == 'TASK':
+            self.run_task()
 
-    def handle_to_start(self):
+    def run_moving(self):
         start_point = MISSION_TARGETS.get('m1s')
         if start_point is None:
             self.get_logger().warn('m1s 좌표 없음 (field_config.py 확인)', throttle_duration_sec=5.0)
@@ -96,9 +95,9 @@ class ObstacleCourse(Node):
             return
 
         self.get_logger().info('m1s 도착 - m1e 목표로 전환')
-        self.state = self.STATE_TO_END
+        self.phase = 'TASK'
 
-    def handle_to_end(self):
+    def run_task(self):
         end_point = MISSION_TARGETS.get('m1e')
         if end_point is None:
             self.get_logger().warn('m1e 좌표 없음 (field_config.py 확인)', throttle_duration_sec=5.0)
@@ -179,7 +178,7 @@ class ObstacleCourse(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = ObstacleCourse()
+    node = Mission1()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
