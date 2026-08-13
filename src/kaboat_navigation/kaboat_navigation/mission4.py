@@ -12,9 +12,11 @@ from kaboat_navigation.field_config import MISSION_TARGETS, MISSION_TARGETS_CONF
 
 class Mission4(Node):
     """
-    미션 4 = 탐색 (목표색 부표 중심 원선회).
+    미션 4 - 탐색/선회.
+    대회 규정: 지정된 색 부표를 중심으로 360도 완전히 선회해야 완료. 회전방향은
+    색상별 고정 - 빨강/초록=시계방향(CW), 흰색=반시계방향(CCW). 모양은 무관.
 
-    전체 흐름:
+    흐름:
       MOVING : m4s로 GPS 이동. 도착하면 SEARCH로 전환.
       SEARCH : camera/detections에서 TARGET_COLOR가 연속으로 CONFIRM_STREAK
                프레임 이상 잡히면 확정, APPROACH로 전환. 확정 순간의 카메라
@@ -24,12 +26,13 @@ class Mission4(Node):
                 거리가 CIRCLE_START_DIST 이내가 되면 CIRCLE로.
       CIRCLE : 라이다만 사용. 가장 가까운 클러스터를 부표로 보고 거리
                유지하며 원선회. imu_heading을 부호 포함으로 누적, 360도
-               채우면 EXIT로. 선회방향: 빨강/초록=시계방향(CW),
-               흰색=반시계방향(CCW).
+               채우면 EXIT로.
       EXIT   : m4e로 GPS 이동. 도착하면 done 발행.
 
     목표색은 field_config.py의 MISSION_TARGETS_CONFIG에서 가져옴.
     """
+
+    MY_MISSION = 'mission_4'
 
     TARGET_COLOR = MISSION_TARGETS_CONFIG['mission_4']['color']
 
@@ -83,10 +86,10 @@ class Mission4(Node):
         self.get_logger().info('미션4(탐색) 노드 대기 중')
 
     def active_cb(self, msg):
-        self.active = (msg.data == 'mission_4')
+        self.active = (msg.data == self.MY_MISSION)
 
     def started_cb(self, msg):
-        if msg.data == 'mission_4':
+        if msg.data == self.MY_MISSION:
             self.get_logger().info('★ 미션4 시작 (MOVING -> m4s로 이동) ★')
             self.phase = 'MOVING'
             self.confirm_streak = 0
@@ -290,7 +293,7 @@ class Mission4(Node):
             self.get_logger().info('m4e 도달! 미션4 완료')
             self.cmd_pub.publish(Twist())
             done = String()
-            done.data = 'mission_4'
+            done.data = self.MY_MISSION
             self.done_pub.publish(done)
             return
 
