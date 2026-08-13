@@ -9,18 +9,19 @@ from rclpy.qos import qos_profile_sensor_data
 from kaboat_navigation.field_config import MISSION_TARGETS, TRANSIT_ARRIVAL_RADIUS_M
 
 
-class StationKeeping(Node):
+class Mission2(Node):
     """
-    mission_2 - 위치유지 (Station Keeping).
-    경기규정: 대상부표 5m 이내에서 5초간 위치를 정지 유지. 부표와 충돌 시 패널티.
-
-    LiDAR 단독으로 최근접 클러스터를 부표로 lock (색상 구분 불필요한 미션).
-    데드밴드 P제어 + 히스테리시스 홀딩.
+    미션 2 - 위치유지.
+    대회 규정: 대상 부표 5m 이내에서 5초간 위치를 정지 유지해야 완료. 충돌 시
+    패널티. 색상 구분 불필요(최근접 부표를 대상으로 인정).
 
     흐름:
-      MOVING : m2s로 GPS 이동. 도착하면 TASK로 전환.
-      TASK   : LiDAR로 부표 락온 + 위치유지. 완료 후 m2e로 이동.
+      MOVING : m2s로 GPS 이동
+      TASK   : LiDAR 최근접 클러스터를 부표로 락온, 데드밴드 P제어 + 히스테리시스
+               로 5m 유지, 5초 성공시 m2e로 이동 후 done
     """
+
+    MY_MISSION = 'mission_2'
 
     TARGET_DIST = 5.0
     DEADBAND = 1.0
@@ -31,13 +32,10 @@ class StationKeeping(Node):
     SEARCH_CRAWL_SPEED = 0.15
     CLUSTER_JUMP_THRESHOLD = 0.3
 
-    MY_MISSION = 'mission_2'
-    STATE_MOVING, STATE_TASK = range(2)
-
     def __init__(self):
-        super().__init__('mission2')
+        super().__init__('mission_2')
         self.active = False
-        self.state = self.STATE_MOVING
+        self.phase = 'MOVING'
         self.current_heading = None
         self.current_lat = None
         self.current_lon = None
@@ -58,14 +56,14 @@ class StationKeeping(Node):
         self.done_pub = self.create_publisher(String, 'mission/done', 10)
 
         self.timer = self.create_timer(0.1, self.control_loop)
-        self.get_logger().info('mission2(위치유지) 노드 시작 - 부표 5m 이내 5초 정지유지')
+        self.get_logger().info('mission_2(위치유지) 노드 시작 - 부표 5m 이내 5초 정지유지')
 
     def active_cb(self, msg):
         self.active = (msg.data == self.MY_MISSION)
 
     def started_cb(self, msg):
         if msg.data == self.MY_MISSION:
-            self.state = self.STATE_MOVING
+            self.phase = 'MOVING'
             self.locked_target = None
             self.holding = False
             self.hold_start_time = None
@@ -85,7 +83,7 @@ class StationKeeping(Node):
             pass
 
     def scan_cb(self, msg):
-        if not self.active or self.exiting or self.state != self.STATE_TASK:
+        if not self.active or self.exiting or self.phase != 'TASK':
             return
 
         n = len(msg.ranges)
@@ -118,14 +116,40 @@ class StationKeeping(Node):
         if not self.active:
             return
 
-        if self.state == self.STATE_MOVING:
-            self.handle_moving()
+        if self.phase == 'MOVING':
+            self.run_moving()
             return
 
         if self.exiting:
-            self.handle_exit_transit()
+            self.run_exit()
             return
 
+        self.run_task()
+
+    def run_moving(self):
+        if self.current_lat is None:
+            return
+
+        start_point = MISSION_TARGETS.get('m2s')
+        if start_point is None:
+            self.get_logger().warn('m2s 좌표 없음 (field_config.py 확인)', throttle_duration_sec=5.0)
+            return
+
+        dist = self.distance_m(self.current_lat, self.current_lon, *start_point)
+        if dist > TRANSIT_ARRIVAL_RADIUS_M:
+            brg = self.bearing_deg(self.current_lat, self.current_lon, *start_point)
+            h_msg = Float32()
+            h_msg.data = brg
+            self.heading_pub.publish(h_msg)
+            cmd = Twist()
+            cmd.linear.x = 0.2
+            self.cmd_pub.publish(cmd)
+            return
+
+        self.get_logger().info('m2s 도착 - 위치유지 TASK로 전환')
+        self.phase = 'TASK'
+
+    def run_task(self):
         if self.locked_target is None:
             cmd = Twist()
             cmd.linear.x = self.SEARCH_CRAWL_SPEED
@@ -152,29 +176,6 @@ class StationKeeping(Node):
 
         self.update_hold_timer(r)
 
-    def handle_moving(self):
-        if self.current_lat is None:
-            return
-
-        start_point = MISSION_TARGETS.get('m2s')
-        if start_point is None:
-            self.get_logger().warn('m2s 좌표 없음 (field_config.py 확인)', throttle_duration_sec=5.0)
-            return
-
-        dist = self.distance_m(self.current_lat, self.current_lon, *start_point)
-        if dist > TRANSIT_ARRIVAL_RADIUS_M:
-            brg = self.bearing_deg(self.current_lat, self.current_lon, *start_point)
-            h_msg = Float32()
-            h_msg.data = brg
-            self.heading_pub.publish(h_msg)
-            cmd = Twist()
-            cmd.linear.x = 0.2
-            self.cmd_pub.publish(cmd)
-            return
-
-        self.get_logger().info('m2s 도착 - 위치유지 TASK로 전환')
-        self.state = self.STATE_TASK
-
     def update_hold_timer(self, r):
         outer_limit = self.TARGET_DIST + self.OUTER_HYSTERESIS
         inner_ok = r <= self.TARGET_DIST
@@ -194,7 +195,7 @@ class StationKeeping(Node):
 
         elapsed = (self.get_clock().now() - self.hold_start_time).nanoseconds / 1e9
         if elapsed >= self.HOLD_SECONDS:
-            self.get_logger().info('★★★ mission_2 5초 위치유지 성공 ★★★')
+            self.get_logger().info('mission_2 5초 위치유지 성공')
             self.holding = False
             end_point = MISSION_TARGETS.get('m2e')
             if end_point is not None:
@@ -203,7 +204,7 @@ class StationKeeping(Node):
             else:
                 self.finish()
 
-    def handle_exit_transit(self):
+    def run_exit(self):
         point = MISSION_TARGETS.get('m2e')
         if point is not None and self.current_lat is not None:
             dist_to_point = self.distance_m(self.current_lat, self.current_lon, point[0], point[1])
@@ -220,7 +221,7 @@ class StationKeeping(Node):
         self.finish()
 
     def finish(self):
-        self.get_logger().info('★★★ mission_2 전체 완료 ★★★')
+        self.get_logger().info('mission_2 전체 완료')
         done = String()
         done.data = self.MY_MISSION
         self.done_pub.publish(done)
@@ -280,7 +281,7 @@ class StationKeeping(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = StationKeeping()
+    node = Mission2()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
