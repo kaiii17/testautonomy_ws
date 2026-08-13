@@ -6,28 +6,26 @@ from std_msgs.msg import String
 class MissionManager(Node):
     """
     상태 머신 - 미션 순서 관리자.
-    하는 일은 딱 2개:
+    하는 일:
       1. 지금 어떤 미션이 활성인지 계속 알림 (mission/active, 0.5초마다)
-      2. 미션이 막 시작된 순간에 1회 알림 (mission/started - 각 미션 노드가
-         자기 상태(phase=MOVING 등) 초기화 트리거로 사용)
+      2. 미션이 막 시작된 순간에 1회 알림 (mission/started)
+      3. 미션 전환 시 전체 진행상황을 로그로 시각화 (완료/현재/대기 표시)
+      4. STATUS_LOG_INTERVAL_SEC 마다 현재 미션 요약을 반복 출력
 
-    미션0(장소이동)을 맨 앞에 포함 - 출발지에서 미션1 시작 전 준비구역(m0e)
-    까지 순수 GPS 이동만 담당. 이후 각 미션은 MOVING(mNs로 이동) -> TASK
-    (mNe를 기본축 삼아 임무 수행)를 스스로 관리하고, mission/done을 낼 때만
-    여기서 다음 미션으로 넘어간다.
-
-    TODO: 대회 규정 확정되면 MISSIONS 순서 실측/조정.
+    실행 순서 = mission_1(장애물회피) -> mission_2(위치유지) -> mission_3(도킹)
+                -> mission_4(탐색) -> mission_5(항로추종/게이트) -> finished
     """
 
     MISSIONS = [
-        'mission_0',   # 장소이동 (출발지 -> m0e)
-        'mission_1',   # 항로추종(게이트)
-        'mission_2',   # 위치유지
-        'mission_3',   # 도킹
-        'mission_4',   # 탐색(선회)
-        'mission_5',   # 항로추종(추가/예비)
+        'mission_1',
+        'mission_2',
+        'mission_3',
+        'mission_4',
+        'mission_5',
         'finished',
     ]
+
+    STATUS_LOG_INTERVAL_SEC = 5.0
 
     def __init__(self):
         super().__init__('mission_manager')
@@ -36,11 +34,13 @@ class MissionManager(Node):
 
         self.active_pub = self.create_publisher(String, 'mission/active', 10)
         self.started_pub = self.create_publisher(String, 'mission/started', 10)
-        self.create_subscription(String, 'mission/done', self.done_cb, 10)
+        self.create_subscription(String, 'mission/done', self.done_callback, 10)
 
         self.timer = self.create_timer(0.5, self.publish_active)
+        self.status_timer = self.create_timer(self.STATUS_LOG_INTERVAL_SEC, self.log_status_summary)
 
         self.get_logger().info(f'미션 매니저 시작 - 현재: {self.current_mission()}')
+        self.log_progress_board()
         self.publish_started()
 
     def current_mission(self):
@@ -60,7 +60,7 @@ class MissionManager(Node):
         msg.data = self.current_mission()
         self.started_pub.publish(msg)
 
-    def done_cb(self, msg):
+    def done_callback(self, msg):
         if msg.data != self.current_mission():
             return
         if self.current_mission() == 'finished':
@@ -68,7 +68,29 @@ class MissionManager(Node):
         self.get_logger().info(f'{msg.data} 완료! 다음 미션으로 전환')
         self.current_index += 1
         self.get_logger().info(f'현재 미션: {self.current_mission()}')
+        self.log_progress_board()
         self.publish_started()
+
+    def log_progress_board(self):
+        lines = []
+        for i, name in enumerate(self.MISSIONS):
+            if name == 'finished':
+                mark = '🏁' if i == self.current_index else '  '
+            elif i < self.current_index:
+                mark = '✅'
+            elif i == self.current_index:
+                mark = '▶ '
+            else:
+                mark = '⬜'
+            lines.append(f'{mark} {name}')
+        board = '\n'.join(lines)
+        self.get_logger().info(f'\n===== 미션 진행상황 =====\n{board}\n=========================')
+
+    def log_status_summary(self):
+        if self.current_mission() == 'finished':
+            return
+        self.get_logger().info(f'[진행중] {self.current_mission()} '
+                                f'({self.current_index + 1}/{len(self.MISSIONS)})')
 
 
 def main(args=None):
