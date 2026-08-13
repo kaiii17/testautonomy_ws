@@ -4,7 +4,6 @@ from rclpy.node import Node
 from std_msgs.msg import String, Float32
 from geometry_msgs.msg import Twist
 
-from kaboat_navigation.nav_utils import parse_gps_nav, bearing_deg, distance_m, WaypointLogger
 from kaboat_navigation.field_config import MISSION_TARGETS, TRANSIT_ARRIVAL_RADIUS_M
 
 
@@ -39,8 +38,6 @@ class ObstacleCourse(Node):
         self.current_heading = None
 
         self.smoothed_angular = 0.0
-
-        self.start_logged = False
         self.done_logged = False
 
         self.create_subscription(String, 'mission/active', self.active_cb, 10)
@@ -50,7 +47,6 @@ class ObstacleCourse(Node):
         self.cmd_pub = self.create_publisher(Twist, 'cmd_mission', 10)
         self.heading_pub = self.create_publisher(Float32, 'goal/heading', 10)
         self.done_pub = self.create_publisher(String, 'mission/done', 10)
-        self.wp_logger = WaypointLogger(self, self.MY_MISSION)
 
         self.timer = self.create_timer(0.2, self.control_loop)
         self.get_logger().info('mission_1(장애물회피) 노드 시작 - 부드러운 목표추종, 위험회피는 avoidance 전담')
@@ -61,23 +57,21 @@ class ObstacleCourse(Node):
     def started_cb(self, msg):
         if msg.data == self.MY_MISSION:
             self.state = self.STATE_TO_START
-            self.start_logged = False
             self.done_logged = False
             self.smoothed_angular = 0.0
             self.get_logger().info('mission_1 시작 - 상태 초기화')
 
     def gps_cb(self, msg):
-        d = parse_gps_nav(msg.data)
-        if 'lat' in d:
-            self.current_lat = d['lat']
-        if 'lon' in d:
-            self.current_lon = d['lon']
-        if 'imu_heading' in d:
-            self.current_heading = d['imu_heading']
-
-        if self.active and not self.start_logged and self.current_lat is not None:
-            self.wp_logger.log('start', self.current_lat, self.current_lon, self.current_heading)
-            self.start_logged = True
+        try:
+            for part in msg.data.split(','):
+                if part.startswith('lat='):
+                    self.current_lat = float(part.split('=')[1])
+                elif part.startswith('lon='):
+                    self.current_lon = float(part.split('=')[1])
+                elif part.startswith('imu_heading='):
+                    self.current_heading = float(part.split('=')[1])
+        except (ValueError, IndexError):
+            pass
 
     def control_loop(self):
         if not self.active or self.current_lat is None:
@@ -94,9 +88,9 @@ class ObstacleCourse(Node):
             self.get_logger().warn('m1s 좌표 없음 (field_config.py 확인)', throttle_duration_sec=5.0)
             return
 
-        dist = distance_m(self.current_lat, self.current_lon, *start_point)
+        dist = self.distance_m(self.current_lat, self.current_lon, *start_point)
         if dist > TRANSIT_ARRIVAL_RADIUS_M:
-            brg = bearing_deg(self.current_lat, self.current_lon, *start_point)
+            brg = self.bearing_deg(self.current_lat, self.current_lon, *start_point)
             self.publish_heading(brg)
             self._publish_cmd(0.2, brg)
             return
@@ -110,8 +104,8 @@ class ObstacleCourse(Node):
             self.get_logger().warn('m1e 좌표 없음 (field_config.py 확인)', throttle_duration_sec=5.0)
             return
 
-        dist = distance_m(self.current_lat, self.current_lon, *end_point)
-        brg = bearing_deg(self.current_lat, self.current_lon, *end_point)
+        dist = self.distance_m(self.current_lat, self.current_lon, *end_point)
+        brg = self.bearing_deg(self.current_lat, self.current_lon, *end_point)
         self.publish_heading(brg)
         self._publish_cmd(0.3, brg)
 
@@ -160,11 +154,27 @@ class ObstacleCourse(Node):
 
     def finish(self):
         self.get_logger().info('m1e 도착 - mission_1 완료')
-        self.wp_logger.log('end', self.current_lat, self.current_lon, self.current_heading)
         done = String()
         done.data = self.MY_MISSION
         self.done_pub.publish(done)
         self.done_logged = True
+
+    @staticmethod
+    def bearing_deg(lat1, lon1, lat2, lon2):
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        dlambda = math.radians(lon2 - lon1)
+        y = math.sin(dlambda) * math.cos(phi2)
+        x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(dlambda)
+        return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+
+    @staticmethod
+    def distance_m(lat1, lon1, lat2, lon2):
+        R = 6371000.0
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlambda = math.radians(lon2 - lon1)
+        a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 def main(args=None):
