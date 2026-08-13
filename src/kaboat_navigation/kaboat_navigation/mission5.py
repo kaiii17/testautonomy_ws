@@ -20,14 +20,17 @@ class GateNavigation(Node):
     빨강/초록 부표 쌍(게이트)을 순서대로 통과.
 
     센서 활용:
-      - 카메라(vision/targets)는 색상 분류만 신뢰, 실제 range/bearing은
-        LiDAR(/scan) 클러스터로 교체(fuse_vision_lidar)
+      - 카메라(camera/detections, camera_node.py 발행)는 색상 분류만 신뢰,
+        실제 range/bearing은 LiDAR(/scan) 클러스터로 교체(fuse_vision_lidar)
       - GPS로 이미 통과한 게이트의 절대좌표를 기억(GatePositionMemory) ->
         회피기동으로 돌아서 같은 게이트를 다시 근접후보로 잡는 것을 방지
 
     가정
-      - 'vision/targets' (String, JSON): 색상분류된 부표 목록
-        [{"color":"red"/"green","bearing_deg":상대각,"range_m":거리}, ...]
+      - 'camera/detections' (String, JSON): camera_node.py가 발행하는 색상
+        분류된 물체 목록. 실제 필드: [{"color":"R"/"G"/"B", "angle":라디안,
+        "shape":..., "distance":거리(옵션)}, ...]
+        게이트는 R/G만 쓰므로 buoys_cb에서 color를 'red'/'green'으로,
+        angle(라디안)을 bearing_deg(도)로 변환해서 기존 로직 그대로 사용.
 
     로직:
       1. 전방 콘(±80도) 안의 red/green 각각 최근접 1개 -> LiDAR로 range/bearing 보정
@@ -62,7 +65,7 @@ class GateNavigation(Node):
         self.create_subscription(String, 'mission/active', self.active_cb, 10)
         self.create_subscription(String, 'mission/started', self.started_cb, 10)
         self.create_subscription(String, 'kaboat/gps_nav', self.gps_cb, 10)
-        self.create_subscription(String, 'vision/targets', self.buoys_cb, 10)
+        self.create_subscription(String, 'camera/detections', self.buoys_cb, 10)
         self.create_subscription(
             LaserScan, '/scan', self.scan_cb, qos_profile_sensor_data)
 
@@ -107,13 +110,31 @@ class GateNavigation(Node):
             self.wp_logger.log('start', self.current_lat, self.current_lon, self.current_heading)
             self.start_logged = True
 
+    # camera_node.py의 color 코드('R'/'G'/'B') -> 게이트 판정용 색상명.
+    # 파랑(B)은 게이트와 무관하므로 매핑에서 제외 -> 자동으로 걸러짐.
+    CAMERA_COLOR_MAP = {'R': 'red', 'G': 'green'}
+
     def buoys_cb(self, msg):
         if not self.active or self.exiting:
             return
         try:
-            buoys = json.loads(msg.data)
+            detections = json.loads(msg.data)
         except json.JSONDecodeError:
             return
+
+        # camera_node.py 실제 스키마({'color','angle'(rad),'distance'(옵션)})를
+        # 기존 로직이 기대하던 형식({'color':'red'/'green','bearing_deg'(deg),
+        # 'range_m'})으로 변환
+        buoys = []
+        for d in detections:
+            color = self.CAMERA_COLOR_MAP.get(d.get('color'))
+            if color is None:
+                continue
+            buoys.append({
+                'color': color,
+                'bearing_deg': math.degrees(d.get('angle', 0.0)),
+                'range_m': d.get('distance'),
+            })
 
         cone = self.FORWARD_CONE_DEG
         candidates = [b for b in buoys if abs(b['bearing_deg']) <= cone]
