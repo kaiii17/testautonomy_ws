@@ -6,7 +6,6 @@ from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from rclpy.qos import qos_profile_sensor_data
 
-from kaboat_navigation.nav_utils import parse_gps_nav, bearing_deg, distance_m, WaypointLogger, cluster_scan
 from kaboat_navigation.field_config import MISSION_TARGETS, TRANSIT_ARRIVAL_RADIUS_M
 
 
@@ -30,6 +29,7 @@ class StationKeeping(Node):
     FORWARD_CONE_DEG = 90.0
     LOCK_SWITCH_RADIUS_DEG = 15.0
     SEARCH_CRAWL_SPEED = 0.15
+    CLUSTER_JUMP_THRESHOLD = 0.3
 
     MY_MISSION = 'mission_2'
     STATE_MOVING, STATE_TASK = range(2)
@@ -45,7 +45,6 @@ class StationKeeping(Node):
         self.locked_target = None
         self.holding = False
         self.hold_start_time = None
-        self.start_logged = False
         self.exiting = False
 
         self.create_subscription(String, 'mission/active', self.active_cb, 10)
@@ -57,7 +56,6 @@ class StationKeeping(Node):
         self.cmd_pub = self.create_publisher(Twist, 'cmd_mission', 10)
         self.heading_pub = self.create_publisher(Float32, 'goal/heading', 10)
         self.done_pub = self.create_publisher(String, 'mission/done', 10)
-        self.wp_logger = WaypointLogger(self, self.MY_MISSION)
 
         self.timer = self.create_timer(0.1, self.control_loop)
         self.get_logger().info('mission2(위치유지) 노드 시작 - 부표 5m 이내 5초 정지유지')
@@ -71,22 +69,20 @@ class StationKeeping(Node):
             self.locked_target = None
             self.holding = False
             self.hold_start_time = None
-            self.start_logged = False
             self.exiting = False
             self.get_logger().info('mission_2 시작 - 상태 초기화 (m2s로 이동)')
 
     def gps_cb(self, msg):
-        d = parse_gps_nav(msg.data)
-        if 'imu_heading' in d:
-            self.current_heading = d['imu_heading']
-        if 'lat' in d:
-            self.current_lat = d['lat']
-        if 'lon' in d:
-            self.current_lon = d['lon']
-
-        if self.active and not self.start_logged and self.current_lat is not None:
-            self.wp_logger.log('start', self.current_lat, self.current_lon, self.current_heading)
-            self.start_logged = True
+        try:
+            for part in msg.data.split(','):
+                if part.startswith('lat='):
+                    self.current_lat = float(part.split('=')[1])
+                elif part.startswith('lon='):
+                    self.current_lon = float(part.split('=')[1])
+                elif part.startswith('imu_heading='):
+                    self.current_heading = float(part.split('=')[1])
+        except (ValueError, IndexError):
+            pass
 
     def scan_cb(self, msg):
         if not self.active or self.exiting or self.state != self.STATE_TASK:
@@ -94,7 +90,7 @@ class StationKeeping(Node):
 
         n = len(msg.ranges)
         angles = [msg.angle_min + i * msg.angle_increment for i in range(n)]
-        clusters = cluster_scan(msg.ranges, angles, msg.range_min, msg.range_max, max_range=10.0)
+        clusters = self.cluster_scan(msg.ranges, angles, msg.range_min, msg.range_max, max_range=10.0)
 
         cone_rad = math.radians(self.FORWARD_CONE_DEG)
         candidates = [c for c in clusters if abs(c['center_angle']) <= cone_rad]
@@ -165,9 +161,9 @@ class StationKeeping(Node):
             self.get_logger().warn('m2s 좌표 없음 (field_config.py 확인)', throttle_duration_sec=5.0)
             return
 
-        dist = distance_m(self.current_lat, self.current_lon, *start_point)
+        dist = self.distance_m(self.current_lat, self.current_lon, *start_point)
         if dist > TRANSIT_ARRIVAL_RADIUS_M:
-            brg = bearing_deg(self.current_lat, self.current_lon, *start_point)
+            brg = self.bearing_deg(self.current_lat, self.current_lon, *start_point)
             h_msg = Float32()
             h_msg.data = brg
             self.heading_pub.publish(h_msg)
@@ -210,9 +206,9 @@ class StationKeeping(Node):
     def handle_exit_transit(self):
         point = MISSION_TARGETS.get('m2e')
         if point is not None and self.current_lat is not None:
-            dist_to_point = distance_m(self.current_lat, self.current_lon, point[0], point[1])
+            dist_to_point = self.distance_m(self.current_lat, self.current_lon, point[0], point[1])
             if dist_to_point > TRANSIT_ARRIVAL_RADIUS_M:
-                brg = bearing_deg(self.current_lat, self.current_lon, point[0], point[1])
+                brg = self.bearing_deg(self.current_lat, self.current_lon, point[0], point[1])
                 h_msg = Float32()
                 h_msg.data = brg
                 self.heading_pub.publish(h_msg)
@@ -225,10 +221,61 @@ class StationKeeping(Node):
 
     def finish(self):
         self.get_logger().info('★★★ mission_2 전체 완료 ★★★')
-        self.wp_logger.log('end', self.current_lat, self.current_lon, self.current_heading)
         done = String()
         done.data = self.MY_MISSION
         self.done_pub.publish(done)
+
+    def cluster_scan(self, ranges, angles, range_min, range_max, max_range):
+        """연속된 유효 거리값들을 클러스터로 묶는다.
+        각 클러스터의 대표각도(중앙 인덱스 각도)와 평균거리를 반환."""
+        n = len(ranges)
+        effective_max = min(range_max, max_range)
+        valid = [r if range_min < r < effective_max else None for r in ranges]
+
+        clusters = []
+        start_idx = None
+        for i in range(n):
+            if valid[i] is not None:
+                if start_idx is None:
+                    start_idx = i
+                elif abs(valid[i] - valid[i - 1]) > self.CLUSTER_JUMP_THRESHOLD:
+                    clusters.append((start_idx, i - 1))
+                    start_idx = i
+            else:
+                if start_idx is not None:
+                    clusters.append((start_idx, i - 1))
+                    start_idx = None
+        if start_idx is not None:
+            clusters.append((start_idx, n - 1))
+
+        result = []
+        for s, e in clusters:
+            seg = [valid[i] for i in range(s, e + 1) if valid[i] is not None]
+            if not seg:
+                continue
+            center_idx = (s + e) // 2
+            result.append({
+                'center_angle': angles[center_idx],
+                'min_range': sum(seg) / len(seg),
+            })
+        return result
+
+    @staticmethod
+    def bearing_deg(lat1, lon1, lat2, lon2):
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        dlambda = math.radians(lon2 - lon1)
+        y = math.sin(dlambda) * math.cos(phi2)
+        x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(dlambda)
+        return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+
+    @staticmethod
+    def distance_m(lat1, lon1, lat2, lon2):
+        R = 6371000.0
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlambda = math.radians(lon2 - lon1)
+        a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 def main(args=None):
