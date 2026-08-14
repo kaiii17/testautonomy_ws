@@ -1,4 +1,3 @@
-cat > ~/kaboat_ws/src/kaboat_camera/kaboat_camera/camera_node.py << 'EOF'
 import math
 import json
 import rclpy
@@ -242,4 +241,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-EOF
