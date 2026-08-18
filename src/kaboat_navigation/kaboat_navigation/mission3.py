@@ -3,7 +3,7 @@ import json
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String
+from std_msgs.msg import String, Float32
 
 from kaboat_navigation.field_config import MISSION_TARGETS, DOCK_SECTORS, MISSION_TARGETS_CONFIG
 
@@ -81,6 +81,7 @@ class Mission3(Node):
         self.create_subscription(String, 'kaboat/gps_nav', self.gps_cb, 10)
 
         self.cmd_pub = self.create_publisher(Twist, 'cmd_mission', 10)
+        self.heading_pub = self.create_publisher(Float32, 'goal/heading', 10)
         self.done_pub = self.create_publisher(String, 'mission/done', 10)
 
         self.timer = self.create_timer(0.1, self.control_loop)
@@ -199,6 +200,7 @@ class Mission3(Node):
 
         distance = self.distance_m(self.current_lat, self.current_lon, self.hold_lat, self.hold_lon)
         bearing = self.bearing_deg(self.current_lat, self.current_lon, self.hold_lat, self.hold_lon)
+        self.publish_heading(bearing)
         angle_error_deg = self.normalize_angle_deg(bearing - self.current_heading)
 
         cmd = Twist()
@@ -251,6 +253,7 @@ class Mission3(Node):
             return
 
         target_heading_deg = (self.entry_heading + 180.0) % 360.0
+        self.publish_heading(target_heading_deg)
         diff = self.normalize_angle_deg(target_heading_deg - self.current_heading)
 
         if abs(diff) <= self.TURN_COMPLETE_TOLERANCE_DEG:
@@ -285,12 +288,18 @@ class Mission3(Node):
 
     def drive_toward_gps(self, target_lat, target_lon):
         bearing = self.bearing_deg(self.current_lat, self.current_lon, target_lat, target_lon)
+        self.publish_heading(bearing)
         angle_error_deg = self.normalize_angle_deg(bearing - self.current_heading)
 
         cmd = Twist()
         cmd.linear.x = self.CRUISE_SPEED
         cmd.angular.z = self.angle_to_angular(math.radians(angle_error_deg))
         self.cmd_pub.publish(cmd)
+
+    def publish_heading(self, deg):
+        h_msg = Float32()
+        h_msg.data = deg
+        self.heading_pub.publish(h_msg)
 
     def angle_to_angular(self, target_angle_rad):
         return max(-1.0, min(1.0, self.K_ANGLE * target_angle_rad))
