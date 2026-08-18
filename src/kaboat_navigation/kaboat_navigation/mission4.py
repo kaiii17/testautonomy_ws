@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String
+from std_msgs.msg import String, Float32
 from rclpy.qos import qos_profile_sensor_data
 
 from kaboat_navigation.field_config import MISSION_TARGETS, MISSION_TARGETS_CONFIG
@@ -79,6 +79,7 @@ class Mission4(Node):
             LaserScan, '/scan', self.scan_cb, qos_profile_sensor_data)
 
         self.cmd_pub = self.create_publisher(Twist, 'cmd_mission', 10)
+        self.heading_pub = self.create_publisher(Float32, 'goal/heading', 10)
         self.done_pub = self.create_publisher(String, 'mission/done', 10)
 
         self.timer = self.create_timer(0.1, self.control_loop)
@@ -250,6 +251,9 @@ class Mission4(Node):
             self.cmd_pub.publish(Twist())
             return
 
+        if self.current_heading is not None:
+            self.publish_heading((self.current_heading + math.degrees(self.buoy_angle)) % 360.0)
+
         cmd = Twist()
         cmd.linear.x = self.CRUISE_SPEED
         cmd.angular.z = self.angle_to_angular(self.buoy_angle)
@@ -271,6 +275,11 @@ class Mission4(Node):
             self.cmd_pub.publish(Twist())
             self.phase = 'EXIT'
             return
+
+        if self.current_heading is not None:
+            tangent_offset = 90.0 if self.turn_cw else -90.0
+            self.publish_heading(
+                (self.current_heading + math.degrees(self.buoy_angle) + tangent_offset) % 360.0)
 
         dist_error = self.buoy_dist - self.ORBIT_RADIUS
 
@@ -301,12 +310,18 @@ class Mission4(Node):
 
     def drive_toward_gps(self, target_lat, target_lon):
         bearing = self.bearing_deg(self.current_lat, self.current_lon, target_lat, target_lon)
+        self.publish_heading(bearing)
         angle_error_deg = self.normalize_angle_deg(bearing - self.current_heading)
 
         cmd = Twist()
         cmd.linear.x = self.CRUISE_SPEED
         cmd.angular.z = self.angle_to_angular(math.radians(angle_error_deg))
         self.cmd_pub.publish(cmd)
+
+    def publish_heading(self, deg):
+        h_msg = Float32()
+        h_msg.data = deg
+        self.heading_pub.publish(h_msg)
 
     def angle_to_angular(self, target_angle_rad):
         return max(-1.0, min(1.0, self.K_ANGLE * target_angle_rad))
